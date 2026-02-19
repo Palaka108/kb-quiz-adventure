@@ -1,14 +1,16 @@
 import React, { useState, useEffect, useCallback } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import { useAuth } from '../contexts/AuthContext'
 import { useCapture } from '../contexts/CaptureContext'
 import { supabase, withRetry } from '../utils/supabase'
+import { motion, AnimatePresence } from 'framer-motion'
 
 export default function QuizPage() {
   const { currentPlayer } = useAuth()
   const { logQuizAnswer, captureData } = useCapture()
   const navigate = useNavigate()
-  
+  const [searchParams] = useSearchParams()
+
   const [questions, setQuestions] = useState([])
   const [currentIndex, setCurrentIndex] = useState(0)
   const [selectedAnswer, setSelectedAnswer] = useState(null)
@@ -16,36 +18,41 @@ export default function QuizPage() {
   const [answers, setAnswers] = useState([])
   const [sessionId, setSessionId] = useState(null)
   const [isLoading, setIsLoading] = useState(true)
-  const [skillDifficulty, setSkillDifficulty] = useState({})
+  const [streak, setStreak] = useState(0)
+  const [showStreak, setShowStreak] = useState(false)
 
-  const playerColor = currentPlayer?.name === 'Krishna' ? '#3b82f6' : 
+  const quizNumber = parseInt(searchParams.get('quiz') || '7')
+
+  const playerColor = currentPlayer?.name === 'Krishna' ? '#3b82f6' :
                       currentPlayer?.name === 'Balarama' ? '#10b981' : '#9b4dca'
 
-  // Initialize quiz
   useEffect(() => {
     initializeQuiz()
   }, [])
 
   async function initializeQuiz() {
     try {
-      // Load questions
       const { data: allQuestions, error } = await supabase
         .from('kb_questions')
         .select('*')
+        .eq('quiz_number', quizNumber)
         .order('id')
-      
+
       if (error) throw error
 
-      // Shuffle and take 15
-      const shuffled = allQuestions.sort(() => Math.random() - 0.5).slice(0, 15)
-      setQuestions(shuffled)
+      if (!allQuestions || allQuestions.length === 0) {
+        // Fallback: load all questions if quiz_number not found
+        const { data: fallback } = await supabase
+          .from('kb_questions')
+          .select('*')
+          .order('id')
 
-      // Initialize skill difficulties at 3
-      const skills = {}
-      shuffled.forEach(q => {
-        if (!skills[q.skill]) skills[q.skill] = 3
-      })
-      setSkillDifficulty(skills)
+        const shuffled = (fallback || []).sort(() => Math.random() - 0.5).slice(0, 15)
+        setQuestions(shuffled)
+      } else {
+        const shuffled = allQuestions.sort(() => Math.random() - 0.5).slice(0, 15)
+        setQuestions(shuffled)
+      }
 
       // Create session
       const { data: session, error: sessionError } = await supabase
@@ -57,7 +64,8 @@ export default function QuizPage() {
           score_percentage: 0,
           skill_breakdown: {},
           answers: [],
-          status: 'in_progress'
+          status: 'in_progress',
+          quiz_number: quizNumber
         })
         .select()
         .single()
@@ -65,9 +73,10 @@ export default function QuizPage() {
       if (sessionError) throw sessionError
       setSessionId(session.id)
 
-      captureData('quiz_initialized', { 
-        session_id: session.id, 
-        question_count: shuffled.length 
+      captureData('quiz_initialized', {
+        session_id: session.id,
+        quiz_number: quizNumber,
+        question_count: 15
       }, currentPlayer?.name)
 
     } catch (error) {
@@ -87,11 +96,22 @@ export default function QuizPage() {
 
   const handleSubmit = async () => {
     if (selectedAnswer === null || showFeedback) return
-    
+
     const isCorrect = selectedAnswer === currentQuestion.correct_index
     setShowFeedback(true)
 
-    // Record answer
+    // Streak tracking
+    if (isCorrect) {
+      const newStreak = streak + 1
+      setStreak(newStreak)
+      if (newStreak >= 3) {
+        setShowStreak(true)
+        setTimeout(() => setShowStreak(false), 1200)
+      }
+    } else {
+      setStreak(0)
+    }
+
     const answerRecord = {
       questionId: currentQuestion.id,
       skill: currentQuestion.skill,
@@ -104,10 +124,8 @@ export default function QuizPage() {
     const newAnswers = [...answers, answerRecord]
     setAnswers(newAnswers)
 
-    // Log to capture system
     await logQuizAnswer(currentPlayer?.name, currentQuestion.id, selectedAnswer, isCorrect)
 
-    // Update session in Supabase (with retry)
     try {
       await withRetry(async () => {
         const correctCount = newAnswers.filter(a => a.isCorrect).length
@@ -119,32 +137,29 @@ export default function QuizPage() {
             answers: newAnswers
           })
           .eq('id', sessionId)
-        
+
         if (error) throw error
       })
     } catch (error) {
       console.error('Failed to save answer:', error)
-      // Data is captured locally via logQuizAnswer
     }
 
-    // Wait for feedback, then advance
     setTimeout(() => {
       setShowFeedback(false)
       setSelectedAnswer(null)
-      
+
       if (currentIndex < questions.length - 1) {
         setCurrentIndex(currentIndex + 1)
       } else {
         finishQuiz(newAnswers)
       }
-    }, 1500)
+    }, 1800)
   }
 
   async function finishQuiz(finalAnswers) {
     const correctCount = finalAnswers.filter(a => a.isCorrect).length
     const percentage = (correctCount / finalAnswers.length) * 100
 
-    // Calculate skill breakdown
     const breakdown = {}
     finalAnswers.forEach(a => {
       if (!breakdown[a.skill]) breakdown[a.skill] = { total: 0, correct: 0 }
@@ -152,7 +167,6 @@ export default function QuizPage() {
       if (a.isCorrect) breakdown[a.skill].correct++
     })
 
-    // Save final results
     try {
       await withRetry(async () => {
         const { error } = await supabase
@@ -166,11 +180,10 @@ export default function QuizPage() {
             status: 'completed'
           })
           .eq('id', sessionId)
-        
+
         if (error) throw error
       })
 
-      // Update skill mastery
       for (const [skill, data] of Object.entries(breakdown)) {
         const skillPct = (data.correct / data.total) * 100
         await supabase
@@ -187,25 +200,29 @@ export default function QuizPage() {
       console.error('Failed to save results:', error)
     }
 
-    // Navigate to results
-    navigate('/results', { 
-      state: { 
-        sessionId, 
-        score: correctCount, 
+    navigate('/results', {
+      state: {
+        sessionId,
+        score: correctCount,
         total: finalAnswers.length,
         percentage,
-        breakdown 
-      } 
+        breakdown,
+        quizNumber
+      }
     })
   }
 
   if (isLoading) {
     return (
       <div className="min-h-screen flex items-center justify-center">
-        <div className="text-center">
+        <motion.div
+          className="text-center"
+          initial={{ opacity: 0, scale: 0.8 }}
+          animate={{ opacity: 1, scale: 1 }}
+        >
           <div className="text-5xl mb-4 animate-bounce">📚</div>
-          <p className="text-gray-400">Loading questions...</p>
-        </div>
+          <p className="text-gray-400">Loading Quiz {quizNumber}...</p>
+        </motion.div>
       </div>
     )
   }
@@ -215,106 +232,157 @@ export default function QuizPage() {
   }
 
   const progress = ((currentIndex + 1) / questions.length) * 100
+  const correctSoFar = answers.filter(a => a.isCorrect).length
 
   return (
     <div className="min-h-screen p-4">
       <div className="max-w-2xl mx-auto">
         {/* Header */}
         <header className="mb-6">
-          <div className="flex justify-between items-center mb-4">
+          <div className="flex justify-between items-center mb-2">
             <span className="text-gray-400">
               Question {currentIndex + 1} of {questions.length}
             </span>
-            <span className="px-3 py-1 rounded-full bg-white/10 text-sm">
-              {currentQuestion.skill}
-            </span>
+            <div className="flex items-center gap-3">
+              <span className="px-3 py-1 rounded-full bg-white/10 text-sm text-gray-300">
+                Quiz {quizNumber}
+              </span>
+              <span className="px-3 py-1 rounded-full bg-white/10 text-sm">
+                {currentQuestion.skill.split(' ')[0]}
+              </span>
+            </div>
           </div>
           <div className="progress-bar">
-            <div 
-              className="progress-fill" 
-              style={{ width: `${progress}%` }}
+            <motion.div
+              className="progress-fill"
+              animate={{ width: `${progress}%` }}
+              transition={{ duration: 0.5 }}
             />
           </div>
         </header>
 
-        {/* Question Card */}
-        <div className="glass-card p-8 mb-6">
-          <p className="text-xl md:text-2xl text-white leading-relaxed mb-8">
-            {currentQuestion.text}
-          </p>
-
-          {/* Options */}
-          <div className="space-y-3">
-            {currentQuestion.options.map((option, index) => {
-              let optionClass = 'quiz-option'
-              
-              if (showFeedback) {
-                if (index === currentQuestion.correct_index) {
-                  optionClass += ' correct'
-                } else if (index === selectedAnswer && !isCorrect(index)) {
-                  optionClass += ' incorrect'
-                }
-              } else if (index === selectedAnswer) {
-                optionClass += ' selected'
-              }
-
-              return (
-                <button
-                  key={index}
-                  onClick={() => handleAnswerSelect(index)}
-                  disabled={showFeedback}
-                  className={`${optionClass} w-full text-left`}
-                >
-                  <span className="inline-flex items-center justify-center w-8 h-8 rounded-lg bg-white/10 mr-3 text-sm font-bold">
-                    {String.fromCharCode(65 + index)}
-                  </span>
-                  <span className="text-white">{option}</span>
-                </button>
-              )
-            })}
-          </div>
-
-          {/* Feedback */}
-          {showFeedback && (
-            <div className={`mt-6 p-4 rounded-xl ${
-              selectedAnswer === currentQuestion.correct_index 
-                ? 'bg-emerald-500/20 border border-emerald-500/50' 
-                : 'bg-red-500/20 border border-red-500/50'
-            }`}>
-              <p className="font-bold mb-1">
-                {selectedAnswer === currentQuestion.correct_index ? '✓ Correct!' : '✗ Not quite!'}
-              </p>
-              {currentQuestion.explanation && (
-                <p className="text-sm text-gray-300">{currentQuestion.explanation}</p>
-              )}
-            </div>
+        {/* Streak notification */}
+        <AnimatePresence>
+          {showStreak && (
+            <motion.div
+              initial={{ opacity: 0, y: -20, scale: 0.8 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: -20, scale: 0.8 }}
+              className="text-center mb-4"
+            >
+              <span className="inline-block px-4 py-2 rounded-full bg-gradient-to-r from-yellow-500/30 to-orange-500/30 border border-yellow-500/50 text-yellow-300 font-bold">
+                🔥 {streak} in a row!
+              </span>
+            </motion.div>
           )}
-        </div>
+        </AnimatePresence>
+
+        {/* Question Card */}
+        <AnimatePresence mode="wait">
+          <motion.div
+            key={currentIndex}
+            initial={{ opacity: 0, x: 50 }}
+            animate={{ opacity: 1, x: 0 }}
+            exit={{ opacity: 0, x: -50 }}
+            transition={{ duration: 0.3 }}
+            className="glass-card p-8 mb-6"
+          >
+            {/* Difficulty indicator */}
+            <div className="flex items-center gap-1 mb-4">
+              {[1,2,3,4,5].map(d => (
+                <div key={d} className={`w-2 h-2 rounded-full ${
+                  d <= currentQuestion.difficulty ? 'bg-yellow-400' : 'bg-white/10'
+                }`} />
+              ))}
+              <span className="text-xs text-gray-500 ml-2">
+                Level {currentQuestion.difficulty}
+              </span>
+            </div>
+
+            <p className="text-xl md:text-2xl text-white leading-relaxed mb-8">
+              {currentQuestion.text}
+            </p>
+
+            {/* Options */}
+            <div className="space-y-3">
+              {currentQuestion.options.map((option, index) => {
+                let optionClass = 'quiz-option'
+
+                if (showFeedback) {
+                  if (index === currentQuestion.correct_index) {
+                    optionClass += ' correct'
+                  } else if (index === selectedAnswer && index !== currentQuestion.correct_index) {
+                    optionClass += ' incorrect'
+                  }
+                } else if (index === selectedAnswer) {
+                  optionClass += ' selected'
+                }
+
+                return (
+                  <motion.button
+                    key={index}
+                    onClick={() => handleAnswerSelect(index)}
+                    disabled={showFeedback}
+                    className={`${optionClass} w-full text-left`}
+                    whileHover={!showFeedback ? { scale: 1.01 } : {}}
+                    whileTap={!showFeedback ? { scale: 0.99 } : {}}
+                  >
+                    <span className="inline-flex items-center justify-center w-8 h-8 rounded-lg bg-white/10 mr-3 text-sm font-bold">
+                      {String.fromCharCode(65 + index)}
+                    </span>
+                    <span className="text-white">{option}</span>
+                  </motion.button>
+                )
+              })}
+            </div>
+
+            {/* Feedback */}
+            <AnimatePresence>
+              {showFeedback && (
+                <motion.div
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  className={`mt-6 p-4 rounded-xl ${
+                    selectedAnswer === currentQuestion.correct_index
+                      ? 'bg-emerald-500/20 border border-emerald-500/50'
+                      : 'bg-red-500/20 border border-red-500/50'
+                  }`}
+                >
+                  <p className="font-bold mb-1">
+                    {selectedAnswer === currentQuestion.correct_index ? '✓ Correct!' : '✗ Not quite!'}
+                  </p>
+                  {currentQuestion.explanation && (
+                    <p className="text-sm text-gray-300">{currentQuestion.explanation}</p>
+                  )}
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </motion.div>
+        </AnimatePresence>
 
         {/* Submit Button */}
         {!showFeedback && (
-          <button
+          <motion.button
             onClick={handleSubmit}
             disabled={selectedAnswer === null}
             className="w-full py-4 rounded-xl font-bold text-lg transition-all
                      disabled:bg-white/10 disabled:text-gray-500"
-            style={{ 
-              backgroundColor: selectedAnswer !== null ? playerColor : undefined 
+            style={{
+              backgroundColor: selectedAnswer !== null ? playerColor : undefined
             }}
+            whileHover={selectedAnswer !== null ? { scale: 1.01 } : {}}
+            whileTap={selectedAnswer !== null ? { scale: 0.99 } : {}}
           >
             {currentIndex < questions.length - 1 ? 'Submit Answer' : 'Finish Quiz'}
-          </button>
+          </motion.button>
         )}
 
         {/* Score Preview */}
         <div className="mt-4 text-center text-gray-500">
-          Current Score: {answers.filter(a => a.isCorrect).length}/{answers.length}
+          Score: {correctSoFar}/{answers.length}
+          {streak >= 2 && <span className="ml-2 text-yellow-400">🔥 {streak} streak</span>}
         </div>
       </div>
     </div>
   )
-
-  function isCorrect(index) {
-    return index === currentQuestion.correct_index
-  }
 }

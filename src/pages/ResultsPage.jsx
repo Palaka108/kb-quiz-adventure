@@ -9,7 +9,7 @@ export default function ResultsPage() {
   const { currentPlayer, refreshPlayer } = useAuth()
   const [showDetails, setShowDetails] = useState(false)
 
-  const { score = 0, total = 15, percentage = 0, breakdown = {} } = location.state || {}
+  const { score = 0, total = 15, percentage = 0, breakdown = {}, quizNumber } = location.state || {}
 
   const playerColor = currentPlayer?.name === 'Krishna' ? '#3b82f6' : 
                       currentPlayer?.name === 'Balarama' ? '#10b981' : '#9b4dca'
@@ -75,7 +75,9 @@ export default function ResultsPage() {
         <div className="glass-card p-8 text-center animate-bounce-in">
           {/* Header */}
           <div className="text-6xl mb-4">{getEmoji()}</div>
-          <h1 className="text-3xl font-display text-white mb-2">Quiz Complete!</h1>
+          <h1 className="text-3xl font-display text-white mb-2">
+            {quizNumber ? `Quiz ${quizNumber}` : 'Quiz'} Complete!
+          </h1>
           <p className="text-gray-400 mb-8">{getMessage()}</p>
 
           {/* Score Circle */}
@@ -162,7 +164,7 @@ export default function ResultsPage() {
           {/* Action Buttons */}
           <div className="flex flex-col gap-3">
             <button
-              onClick={() => navigate('/quiz')}
+              onClick={() => navigate(quizNumber ? `/quiz?quiz=${quizNumber}` : '/quiz')}
               className="btn-roblox w-full"
               style={{ backgroundColor: playerColor }}
             >

@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { useAuth } from '../contexts/AuthContext'
 import { useCapture } from '../contexts/CaptureContext'
 import { supabase } from '../utils/supabase'
+import { motion, AnimatePresence } from 'framer-motion'
 
 const TUTORIAL_GAMES = [
   {
@@ -31,15 +32,43 @@ const TUTORIAL_GAMES = [
   }
 ]
 
+// All quizzes with metadata
+const QUIZ_CATALOG = [
+  {
+    number: 5,
+    title: 'Quiz 5: Foundations',
+    description: 'Fractions, decimals & word problems basics',
+    questionCount: 15,
+    isLegacy: true
+  },
+  {
+    number: 6,
+    title: 'Quiz 6: Level Up',
+    description: 'Harder fractions & multi-step problems',
+    questionCount: 10,
+    isLegacy: true
+  },
+  {
+    number: 7,
+    title: 'Quiz 7: Decimal Master',
+    description: 'Multipliers, geometric patterns & tricky decimals',
+    questionCount: 15,
+    isNew: true,
+    focusAreas: ['Decimal Multipliers', 'Geometric Patterns', 'Multi-Step Problems']
+  }
+]
+
 export default function DashboardPage() {
   const { currentPlayer, logout, refreshPlayer } = useAuth()
   const { logAction } = useCapture()
   const navigate = useNavigate()
   const [skillsNeedingReview, setSkillsNeedingReview] = useState([])
   const [recentSessions, setRecentSessions] = useState([])
+  const [quizHistory, setQuizHistory] = useState({})
   const [showLearningPrompt, setShowLearningPrompt] = useState(false)
+  const [showQuizPicker, setShowQuizPicker] = useState(false)
 
-  const playerColor = currentPlayer?.name === 'Krishna' ? '#3b82f6' : 
+  const playerColor = currentPlayer?.name === 'Krishna' ? '#3b82f6' :
                       currentPlayer?.name === 'Balarama' ? '#10b981' : '#9b4dca'
 
   useEffect(() => {
@@ -49,7 +78,6 @@ export default function DashboardPage() {
   async function loadPlayerData() {
     if (!currentPlayer) return
 
-    // Check for skills needing review
     const { data: skills } = await supabase
       .from('kb_skill_mastery')
       .select('*')
@@ -59,16 +87,26 @@ export default function DashboardPage() {
     setSkillsNeedingReview(skills || [])
     setShowLearningPrompt((skills?.length || 0) > 0)
 
-    // Get recent sessions
+    // Get recent completed sessions
     const { data: sessions } = await supabase
       .from('kb_quiz_sessions')
       .select('*')
       .eq('player_name', currentPlayer.name)
       .eq('status', 'completed')
       .order('completed_at', { ascending: false })
-      .limit(3)
+      .limit(10)
 
     setRecentSessions(sessions || [])
+
+    // Build quiz history: best score per quiz_number
+    const history = {}
+    ;(sessions || []).forEach(s => {
+      const qn = s.quiz_number || 'unknown'
+      if (!history[qn] || s.score_percentage > history[qn].score_percentage) {
+        history[qn] = s
+      }
+    })
+    setQuizHistory(history)
   }
 
   const handleGameSelect = (gameId) => {
@@ -76,9 +114,9 @@ export default function DashboardPage() {
     navigate(`/tutorial/${gameId}`)
   }
 
-  const handleStartQuiz = () => {
-    logAction('quiz_started', {}, currentPlayer?.name)
-    navigate('/quiz')
+  const handleStartQuiz = (quizNum) => {
+    logAction('quiz_started', { quiz_number: quizNum }, currentPlayer?.name)
+    navigate(`/quiz?quiz=${quizNum}`)
   }
 
   const handleStartLearning = (skill) => {
@@ -91,13 +129,16 @@ export default function DashboardPage() {
     navigate('/login')
   }
 
+  // Find the "next" quiz (latest one)
+  const latestQuiz = QUIZ_CATALOG[QUIZ_CATALOG.length - 1]
+
   return (
     <div className="min-h-screen p-4 md:p-6">
       <div className="max-w-4xl mx-auto">
         {/* Header */}
         <header className="flex items-center justify-between mb-8">
           <div className="flex items-center gap-4">
-            <div 
+            <div
               className="w-14 h-14 rounded-full flex items-center justify-center text-2xl font-bold"
               style={{ backgroundColor: `${playerColor}30`, color: playerColor }}
             >
@@ -120,7 +161,9 @@ export default function DashboardPage() {
 
         {/* Learning Prompt (if skills need review) */}
         {showLearningPrompt && (
-          <div 
+          <motion.div
+            initial={{ opacity: 0, y: -10 }}
+            animate={{ opacity: 1, y: 0 }}
             className="glass-card p-6 mb-6 border-l-4"
             style={{ borderLeftColor: playerColor }}
           >
@@ -142,7 +185,7 @@ export default function DashboardPage() {
                                hover:scale-105 active:scale-95"
                       style={{ backgroundColor: playerColor }}
                     >
-                      {skill.skill.split(' ')[0]} ({Math.round(skill.first_attempt_score)}% → ?)
+                      {skill.skill.split(' ')[0]} ({Math.round(skill.current_score || skill.first_attempt_score)}%)
                     </button>
                   ))}
                 </div>
@@ -154,8 +197,58 @@ export default function DashboardPage() {
                 </button>
               </div>
             </div>
-          </div>
+          </motion.div>
         )}
+
+        {/* NEW QUIZ — Big Call to Action */}
+        <section className="mb-8">
+          <motion.button
+            onClick={() => handleStartQuiz(latestQuiz.number)}
+            className="w-full glass-card p-8 text-center transition-all duration-300
+                     hover:scale-[1.01] active:scale-[0.99] relative overflow-hidden"
+            style={{
+              borderColor: playerColor,
+              boxShadow: `0 0 30px ${playerColor}30`
+            }}
+            whileHover={{ scale: 1.01 }}
+            whileTap={{ scale: 0.99 }}
+          >
+            {/* NEW badge */}
+            <div className="absolute top-4 right-4">
+              <span className="px-3 py-1 rounded-full bg-gradient-to-r from-yellow-500 to-orange-500 text-xs font-bold text-black animate-pulse">
+                NEW
+              </span>
+            </div>
+
+            <div className="text-5xl mb-4">🎯</div>
+            <h2 className="text-2xl font-display text-white mb-2">{latestQuiz.title}</h2>
+            <p className="text-gray-400 mb-3">{latestQuiz.description}</p>
+
+            {latestQuiz.focusAreas && (
+              <div className="flex flex-wrap justify-center gap-2 mb-4">
+                {latestQuiz.focusAreas.map(area => (
+                  <span key={area} className="px-2 py-1 rounded-full bg-white/10 text-xs text-gray-300">
+                    {area}
+                  </span>
+                ))}
+              </div>
+            )}
+
+            <div
+              className="mt-2 inline-block px-8 py-3 rounded-xl font-bold text-white"
+              style={{ backgroundColor: playerColor }}
+            >
+              Start Quiz 7 →
+            </div>
+
+            {/* Best score if exists */}
+            {quizHistory[latestQuiz.number] && (
+              <p className="text-gray-500 text-sm mt-3">
+                Best score: {Math.round(quizHistory[latestQuiz.number].score_percentage)}%
+              </p>
+            )}
+          </motion.button>
+        </section>
 
         {/* Tutorial Games Section */}
         <section className="mb-8">
@@ -164,16 +257,20 @@ export default function DashboardPage() {
             <span className="text-sm font-normal text-gray-400">(Play before your quiz!)</span>
           </h2>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            {TUTORIAL_GAMES.map(game => (
-              <button
+            {TUTORIAL_GAMES.map((game, i) => (
+              <motion.button
                 key={game.id}
                 onClick={() => handleGameSelect(game.id)}
-                className="glass-card p-6 text-left transition-all duration-300
-                         hover:scale-[1.02] hover:-translate-y-1 active:scale-[0.98]"
-                style={{ 
+                className="glass-card p-6 text-left transition-all duration-300"
+                style={{
                   borderColor: `${game.color}50`,
                   boxShadow: `0 4px 20px ${game.color}20`
                 }}
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ delay: i * 0.1 }}
+                whileHover={{ scale: 1.02, y: -4 }}
+                whileTap={{ scale: 0.98 }}
               >
                 <div className="text-4xl mb-3">{game.emoji}</div>
                 <h3 className="text-lg font-bold text-white mb-1">{game.name}</h3>
@@ -181,32 +278,84 @@ export default function DashboardPage() {
                 <div className="flex items-center gap-2 text-xs text-gray-500">
                   <span>⏱️ {game.duration}</span>
                 </div>
-              </button>
+              </motion.button>
             ))}
           </div>
         </section>
 
-        {/* Start Quiz Button */}
+        {/* Quiz History */}
         <section className="mb-8">
           <button
-            onClick={handleStartQuiz}
-            className="w-full glass-card p-8 text-center transition-all duration-300
-                     hover:scale-[1.01] active:scale-[0.99]"
-            style={{ 
-              borderColor: playerColor,
-              boxShadow: `0 0 30px ${playerColor}30`
-            }}
+            onClick={() => setShowQuizPicker(!showQuizPicker)}
+            className="flex items-center gap-2 text-xl font-display text-white mb-4"
           >
-            <div className="text-5xl mb-4">🎯</div>
-            <h2 className="text-2xl font-display text-white mb-2">Start Quiz</h2>
-            <p className="text-gray-400">15 questions • Adaptive difficulty</p>
-            <div 
-              className="mt-4 inline-block px-8 py-3 rounded-xl font-bold text-white"
-              style={{ backgroundColor: playerColor }}
-            >
-              Let's Go! →
-            </div>
+            <span>📋</span> All Quizzes
+            <span className="text-sm text-gray-400">{showQuizPicker ? '▼' : '▶'}</span>
           </button>
+
+          <AnimatePresence>
+            {showQuizPicker && (
+              <motion.div
+                initial={{ height: 0, opacity: 0 }}
+                animate={{ height: 'auto', opacity: 1 }}
+                exit={{ height: 0, opacity: 0 }}
+                className="overflow-hidden"
+              >
+                <div className="space-y-3">
+                  {QUIZ_CATALOG.map(quiz => {
+                    const bestSession = quizHistory[quiz.number]
+                    const bestScore = bestSession ? Math.round(bestSession.score_percentage) : null
+
+                    return (
+                      <motion.div
+                        key={quiz.number}
+                        className={`glass-card p-4 flex items-center gap-4 cursor-pointer transition-all
+                                  ${quiz.isNew ? 'border-yellow-500/30' : ''}`}
+                        onClick={() => handleStartQuiz(quiz.number)}
+                        whileHover={{ scale: 1.01 }}
+                        whileTap={{ scale: 0.99 }}
+                      >
+                        <div className={`w-12 h-12 rounded-xl flex items-center justify-center text-lg font-bold
+                                      ${quiz.isNew ? 'bg-gradient-to-br from-yellow-500/30 to-orange-500/30 text-yellow-300' :
+                                        bestScore !== null && bestScore >= 70 ? 'bg-emerald-500/20 text-emerald-400' :
+                                        bestScore !== null ? 'bg-yellow-500/20 text-yellow-400' :
+                                        'bg-white/10 text-gray-400'}`}
+                        >
+                          {bestScore !== null && bestScore >= 70 ? '✓' :
+                           bestScore !== null ? `${bestScore}%` :
+                           quiz.number}
+                        </div>
+
+                        <div className="flex-1">
+                          <div className="flex items-center gap-2">
+                            <h3 className="text-white font-bold">{quiz.title}</h3>
+                            {quiz.isNew && (
+                              <span className="px-2 py-0.5 rounded-full bg-yellow-500/20 text-yellow-300 text-xs font-bold">
+                                NEW
+                              </span>
+                            )}
+                            {quiz.isLegacy && (
+                              <span className="px-2 py-0.5 rounded-full bg-white/10 text-gray-500 text-xs">
+                                Previous
+                              </span>
+                            )}
+                          </div>
+                          <p className="text-gray-400 text-sm">{quiz.description}</p>
+                          {bestSession && (
+                            <p className="text-gray-500 text-xs mt-1">
+                              Best: {bestScore}% • {new Date(bestSession.completed_at).toLocaleDateString()}
+                            </p>
+                          )}
+                        </div>
+
+                        <div className="text-gray-400 text-2xl">→</div>
+                      </motion.div>
+                    )
+                  })}
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
         </section>
 
         {/* Recent Sessions */}
@@ -214,11 +363,11 @@ export default function DashboardPage() {
           <section>
             <h2 className="text-xl font-display text-white mb-4">📊 Recent Quizzes</h2>
             <div className="space-y-3">
-              {recentSessions.map(session => (
+              {recentSessions.slice(0, 5).map(session => (
                 <div key={session.id} className="glass-card p-4 flex items-center justify-between">
                   <div>
                     <p className="text-white font-medium">
-                      {new Date(session.completed_at).toLocaleDateString('en-US', {
+                      {session.quiz_number ? `Quiz ${session.quiz_number}` : 'Quiz'} — {new Date(session.completed_at).toLocaleDateString('en-US', {
                         weekday: 'short',
                         month: 'short',
                         day: 'numeric'
@@ -228,10 +377,10 @@ export default function DashboardPage() {
                       {session.correct_answers}/{session.total_questions} correct
                     </p>
                   </div>
-                  <div 
+                  <div
                     className="text-2xl font-bold"
-                    style={{ 
-                      color: session.score_percentage >= 70 ? '#10b981' : 
+                    style={{
+                      color: session.score_percentage >= 70 ? '#10b981' :
                              session.score_percentage >= 50 ? '#f59e0b' : '#ef4444'
                     }}
                   >
@@ -255,7 +404,7 @@ export default function DashboardPage() {
                     <span className="text-gray-400">{Math.round(skill.current_score)}%</span>
                   </div>
                   <div className="progress-bar">
-                    <div 
+                    <div
                       className="progress-fill"
                       style={{ width: `${skill.current_score}%` }}
                     />
