@@ -9,16 +9,14 @@ export default function ResultsPage() {
   const { currentPlayer, refreshPlayer } = useAuth()
   const [showDetails, setShowDetails] = useState(false)
 
-  const { score = 0, total = 15, percentage = 0, breakdown = {}, quizNumber } = location.state || {}
+  const { score = 0, total = 15, percentage = 0, breakdown = {}, quizNumber, isAdaptive } = location.state || {}
 
-  const playerColor = currentPlayer?.name === 'Krishna' ? '#3b82f6' : 
+  const playerColor = currentPlayer?.name === 'Krishna' ? '#3b82f6' :
                       currentPlayer?.name === 'Balarama' ? '#10b981' : '#9b4dca'
 
   useEffect(() => {
-    // Refresh player data
     refreshPlayer()
 
-    // Celebration confetti for good scores
     if (percentage >= 70) {
       const duration = 3000
       const end = Date.now() + duration
@@ -55,6 +53,12 @@ export default function ResultsPage() {
   }
 
   const getMessage = () => {
+    if (isAdaptive) {
+      if (percentage >= 90) return "Amazing! The adaptive quiz couldn't stump you!"
+      if (percentage >= 70) return "Great work! Your skills are really growing!"
+      if (percentage >= 50) return "Good effort! Tomorrow's quiz will help you improve!"
+      return "Keep going! Each quiz makes you stronger!"
+    }
     if (percentage >= 90) return "Outstanding! You're a math champion!"
     if (percentage >= 70) return "Great job! Keep it up!"
     if (percentage >= 50) return "Good effort! Practice makes perfect!"
@@ -69,6 +73,23 @@ export default function ResultsPage() {
     return 'F'
   }
 
+  // For adaptive quizzes, categorize skills into improved/needs-work
+  const getSkillInsights = () => {
+    const strong = []
+    const needsWork = []
+    Object.entries(breakdown).forEach(([skill, data]) => {
+      const pct = (data.correct / data.total) * 100
+      if (pct >= 70) {
+        strong.push({ skill: skill.split(' ')[0], pct: Math.round(pct) })
+      } else {
+        needsWork.push({ skill: skill.split(' ')[0], pct: Math.round(pct) })
+      }
+    })
+    return { strong, needsWork }
+  }
+
+  const insights = isAdaptive ? getSkillInsights() : null
+
   return (
     <div className="min-h-screen p-4 flex items-center justify-center">
       <div className="max-w-lg w-full">
@@ -76,7 +97,7 @@ export default function ResultsPage() {
           {/* Header */}
           <div className="text-6xl mb-4">{getEmoji()}</div>
           <h1 className="text-3xl font-display text-white mb-2">
-            {quizNumber ? `Quiz ${quizNumber}` : 'Quiz'} Complete!
+            {isAdaptive ? 'Daily Quiz' : quizNumber ? `Quiz ${quizNumber}` : 'Quiz'} Complete!
           </h1>
           <p className="text-gray-400 mb-8">{getMessage()}</p>
 
@@ -110,15 +131,37 @@ export default function ResultsPage() {
           </div>
 
           {/* Grade Badge */}
-          <div 
+          <div
             className="inline-block px-6 py-2 rounded-full text-2xl font-bold mb-8"
-            style={{ 
+            style={{
               backgroundColor: `${playerColor}30`,
               color: playerColor
             }}
           >
             Grade: {getGrade()}
           </div>
+
+          {/* Adaptive Quiz Insights */}
+          {isAdaptive && insights && (
+            <div className="mb-6 space-y-3">
+              {insights.strong.length > 0 && (
+                <div className="bg-emerald-500/10 border border-emerald-500/30 rounded-xl p-4">
+                  <p className="text-emerald-400 font-bold text-sm mb-1">Looking strong:</p>
+                  <p className="text-gray-300 text-sm">
+                    {insights.strong.map(s => `${s.skill} (${s.pct}%)`).join(', ')}
+                  </p>
+                </div>
+              )}
+              {insights.needsWork.length > 0 && (
+                <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-xl p-4">
+                  <p className="text-yellow-400 font-bold text-sm mb-1">Keep practicing:</p>
+                  <p className="text-gray-300 text-sm">
+                    {insights.needsWork.map(s => `${s.skill} (${s.pct}%)`).join(', ')}
+                  </p>
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Skill Breakdown */}
           <div className="mb-8">
@@ -128,7 +171,7 @@ export default function ResultsPage() {
             >
               {showDetails ? '▼ Hide Details' : '▶ Show Skill Breakdown'}
             </button>
-            
+
             {showDetails && (
               <div className="space-y-3 animate-slide-up">
                 {Object.entries(breakdown).map(([skill, data]) => {
@@ -138,18 +181,18 @@ export default function ResultsPage() {
                       <div className="flex justify-between mb-2">
                         <span className="text-white text-sm">{skill}</span>
                         <span className={`text-sm font-bold ${
-                          skillPct >= 70 ? 'text-emerald-400' : 
+                          skillPct >= 70 ? 'text-emerald-400' :
                           skillPct >= 50 ? 'text-yellow-400' : 'text-red-400'
                         }`}>
                           {data.correct}/{data.total}
                         </span>
                       </div>
                       <div className="h-2 bg-white/10 rounded-full overflow-hidden">
-                        <div 
+                        <div
                           className="h-full rounded-full transition-all duration-500"
-                          style={{ 
+                          style={{
                             width: `${skillPct}%`,
-                            backgroundColor: skillPct >= 70 ? '#10b981' : 
+                            backgroundColor: skillPct >= 70 ? '#10b981' :
                                            skillPct >= 50 ? '#f59e0b' : '#ef4444'
                           }}
                         />
@@ -164,11 +207,11 @@ export default function ResultsPage() {
           {/* Action Buttons */}
           <div className="flex flex-col gap-3">
             <button
-              onClick={() => navigate(quizNumber ? `/quiz?quiz=${quizNumber}` : '/quiz')}
+              onClick={() => navigate(isAdaptive ? '/quiz?quiz=daily' : `/quiz?quiz=${quizNumber}`)}
               className="btn-roblox w-full"
               style={{ backgroundColor: playerColor }}
             >
-              🎯 Try Again
+              {isAdaptive ? '🧠 New Daily Quiz' : '🎯 Try Again'}
             </button>
             <button
               onClick={() => navigate('/')}

@@ -4,6 +4,7 @@ import { useAuth } from '../contexts/AuthContext'
 import { useCapture } from '../contexts/CaptureContext'
 import { supabase } from '../utils/supabase'
 import { motion, AnimatePresence } from 'framer-motion'
+import { getDailyFocusSummary } from '../utils/adaptiveQuizEngine'
 
 const TUTORIAL_GAMES = [
   {
@@ -32,7 +33,7 @@ const TUTORIAL_GAMES = [
   }
 ]
 
-// All quizzes with metadata
+// All numbered quizzes with metadata
 const QUIZ_CATALOG = [
   {
     number: 5,
@@ -53,8 +54,7 @@ const QUIZ_CATALOG = [
     title: 'Quiz 7: Decimal Master',
     description: 'Multipliers, geometric patterns & tricky decimals',
     questionCount: 15,
-    isNew: true,
-    focusAreas: ['Decimal Multipliers', 'Geometric Patterns', 'Multi-Step Problems']
+    isLegacy: true
   }
 ]
 
@@ -67,6 +67,9 @@ export default function DashboardPage() {
   const [quizHistory, setQuizHistory] = useState({})
   const [showLearningPrompt, setShowLearningPrompt] = useState(false)
   const [showQuizPicker, setShowQuizPicker] = useState(false)
+  const [focusAreas, setFocusAreas] = useState([])
+  const [dailyQuizCount, setDailyQuizCount] = useState(0)
+  const [lastDailyScore, setLastDailyScore] = useState(null)
 
   const playerColor = currentPlayer?.name === 'Krishna' ? '#3b82f6' :
                       currentPlayer?.name === 'Balarama' ? '#10b981' : '#9b4dca'
@@ -87,6 +90,17 @@ export default function DashboardPage() {
     setSkillsNeedingReview(skills || [])
     setShowLearningPrompt((skills?.length || 0) > 0)
 
+    // Get all skill mastery for adaptive engine focus areas
+    const { data: allSkills } = await supabase
+      .from('kb_skill_mastery')
+      .select('*')
+      .eq('player_name', currentPlayer.name)
+
+    if (allSkills && allSkills.length > 0) {
+      const focus = getDailyFocusSummary(allSkills)
+      setFocusAreas(focus)
+    }
+
     // Get recent completed sessions
     const { data: sessions } = await supabase
       .from('kb_quiz_sessions')
@@ -94,7 +108,7 @@ export default function DashboardPage() {
       .eq('player_name', currentPlayer.name)
       .eq('status', 'completed')
       .order('completed_at', { ascending: false })
-      .limit(10)
+      .limit(20)
 
     setRecentSessions(sessions || [])
 
@@ -107,6 +121,15 @@ export default function DashboardPage() {
       }
     })
     setQuizHistory(history)
+
+    // Count adaptive quiz sessions (quiz_number = 0 or quiz_mode = 'adaptive')
+    const dailySessions = (sessions || []).filter(s =>
+      s.quiz_number === 0 || s.quiz_mode === 'adaptive'
+    )
+    setDailyQuizCount(dailySessions.length)
+    if (dailySessions.length > 0) {
+      setLastDailyScore(Math.round(dailySessions[0].score_percentage))
+    }
   }
 
   const handleGameSelect = (gameId) => {
@@ -119,6 +142,11 @@ export default function DashboardPage() {
     navigate(`/quiz?quiz=${quizNum}`)
   }
 
+  const handleStartDailyQuiz = () => {
+    logAction('daily_quiz_started', {}, currentPlayer?.name)
+    navigate('/quiz?quiz=daily')
+  }
+
   const handleStartLearning = (skill) => {
     logAction('learning_started', { skill }, currentPlayer?.name)
     navigate(`/learning/${encodeURIComponent(skill)}`)
@@ -129,8 +157,26 @@ export default function DashboardPage() {
     navigate('/login')
   }
 
-  // Find the "next" quiz (latest one)
-  const latestQuiz = QUIZ_CATALOG[QUIZ_CATALOG.length - 1]
+  // Greeting based on time
+  const getGreeting = () => {
+    const hour = new Date().getHours()
+    if (hour < 12) return 'Good morning'
+    if (hour < 17) return 'Good afternoon'
+    return 'Good evening'
+  }
+
+  // Focus message for daily quiz CTA
+  const getFocusMessage = () => {
+    const weakAreas = focusAreas.filter(f => f.priority === 'high')
+    if (weakAreas.length > 0) {
+      return `Today's focus: ${weakAreas.map(a => a.skill).join(' & ')}`
+    }
+    const mediumAreas = focusAreas.filter(f => f.priority === 'medium')
+    if (mediumAreas.length > 0) {
+      return `Building your ${mediumAreas.map(a => a.skill).join(' & ')} skills`
+    }
+    return 'A personalized quiz just for you!'
+  }
 
   return (
     <div className="min-h-screen p-4 md:p-6">
@@ -146,7 +192,7 @@ export default function DashboardPage() {
             </div>
             <div>
               <h1 className="text-2xl font-display text-white">
-                Hey, {currentPlayer?.name}! 👋
+                {getGreeting()}, {currentPlayer?.name}! 👋
               </h1>
               <p className="text-gray-400 text-sm">Ready to play?</p>
             </div>
@@ -200,10 +246,10 @@ export default function DashboardPage() {
           </motion.div>
         )}
 
-        {/* NEW QUIZ — Big Call to Action */}
+        {/* DAILY QUIZ — Big Hero CTA */}
         <section className="mb-8">
           <motion.button
-            onClick={() => handleStartQuiz(latestQuiz.number)}
+            onClick={handleStartDailyQuiz}
             className="w-full glass-card p-8 text-center transition-all duration-300
                      hover:scale-[1.01] active:scale-[0.99] relative overflow-hidden"
             style={{
@@ -213,22 +259,32 @@ export default function DashboardPage() {
             whileHover={{ scale: 1.01 }}
             whileTap={{ scale: 0.99 }}
           >
-            {/* NEW badge */}
+            {/* Adaptive badge */}
             <div className="absolute top-4 right-4">
-              <span className="px-3 py-1 rounded-full bg-gradient-to-r from-yellow-500 to-orange-500 text-xs font-bold text-black animate-pulse">
-                NEW
+              <span className="px-3 py-1 rounded-full bg-gradient-to-r from-purple-500 to-blue-500 text-xs font-bold text-white">
+                SMART QUIZ
               </span>
             </div>
 
-            <div className="text-5xl mb-4">🎯</div>
-            <h2 className="text-2xl font-display text-white mb-2">{latestQuiz.title}</h2>
-            <p className="text-gray-400 mb-3">{latestQuiz.description}</p>
+            <div className="text-5xl mb-4">🧠</div>
+            <h2 className="text-2xl font-display text-white mb-2">Daily Quiz</h2>
+            <p className="text-gray-400 mb-3">{getFocusMessage()}</p>
 
-            {latestQuiz.focusAreas && (
+            {/* Focus area pills */}
+            {focusAreas.length > 0 && (
               <div className="flex flex-wrap justify-center gap-2 mb-4">
-                {latestQuiz.focusAreas.map(area => (
-                  <span key={area} className="px-2 py-1 rounded-full bg-white/10 text-xs text-gray-300">
-                    {area}
+                {focusAreas.map(area => (
+                  <span
+                    key={area.skill}
+                    className={`px-2 py-1 rounded-full text-xs ${
+                      area.priority === 'high'
+                        ? 'bg-red-500/20 text-red-300 border border-red-500/30'
+                        : area.priority === 'medium'
+                        ? 'bg-yellow-500/20 text-yellow-300 border border-yellow-500/30'
+                        : 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                    }`}
+                  >
+                    {area.skill} {area.score}%
                   </span>
                 ))}
               </div>
@@ -238,15 +294,18 @@ export default function DashboardPage() {
               className="mt-2 inline-block px-8 py-3 rounded-xl font-bold text-white"
               style={{ backgroundColor: playerColor }}
             >
-              Start Quiz 7 →
+              Start Daily Quiz →
             </div>
 
-            {/* Best score if exists */}
-            {quizHistory[latestQuiz.number] && (
-              <p className="text-gray-500 text-sm mt-3">
-                Best score: {Math.round(quizHistory[latestQuiz.number].score_percentage)}%
-              </p>
-            )}
+            {/* Stats line */}
+            <div className="text-gray-500 text-sm mt-3 flex items-center justify-center gap-4">
+              {lastDailyScore !== null && (
+                <span>Last score: {lastDailyScore}%</span>
+              )}
+              {dailyQuizCount > 0 && (
+                <span>{dailyQuizCount} quizzes completed</span>
+              )}
+            </div>
           </motion.button>
         </section>
 
@@ -283,13 +342,13 @@ export default function DashboardPage() {
           </div>
         </section>
 
-        {/* Quiz History */}
+        {/* Quiz History — Previous Numbered Quizzes */}
         <section className="mb-8">
           <button
             onClick={() => setShowQuizPicker(!showQuizPicker)}
             className="flex items-center gap-2 text-xl font-display text-white mb-4"
           >
-            <span>📋</span> All Quizzes
+            <span>📋</span> Previous Quizzes
             <span className="text-sm text-gray-400">{showQuizPicker ? '▼' : '▶'}</span>
           </button>
 
@@ -309,15 +368,13 @@ export default function DashboardPage() {
                     return (
                       <motion.div
                         key={quiz.number}
-                        className={`glass-card p-4 flex items-center gap-4 cursor-pointer transition-all
-                                  ${quiz.isNew ? 'border-yellow-500/30' : ''}`}
+                        className="glass-card p-4 flex items-center gap-4 cursor-pointer transition-all"
                         onClick={() => handleStartQuiz(quiz.number)}
                         whileHover={{ scale: 1.01 }}
                         whileTap={{ scale: 0.99 }}
                       >
                         <div className={`w-12 h-12 rounded-xl flex items-center justify-center text-lg font-bold
-                                      ${quiz.isNew ? 'bg-gradient-to-br from-yellow-500/30 to-orange-500/30 text-yellow-300' :
-                                        bestScore !== null && bestScore >= 70 ? 'bg-emerald-500/20 text-emerald-400' :
+                                      ${bestScore !== null && bestScore >= 70 ? 'bg-emerald-500/20 text-emerald-400' :
                                         bestScore !== null ? 'bg-yellow-500/20 text-yellow-400' :
                                         'bg-white/10 text-gray-400'}`}
                         >
@@ -329,16 +386,6 @@ export default function DashboardPage() {
                         <div className="flex-1">
                           <div className="flex items-center gap-2">
                             <h3 className="text-white font-bold">{quiz.title}</h3>
-                            {quiz.isNew && (
-                              <span className="px-2 py-0.5 rounded-full bg-yellow-500/20 text-yellow-300 text-xs font-bold">
-                                NEW
-                              </span>
-                            )}
-                            {quiz.isLegacy && (
-                              <span className="px-2 py-0.5 rounded-full bg-white/10 text-gray-500 text-xs">
-                                Previous
-                              </span>
-                            )}
                           </div>
                           <p className="text-gray-400 text-sm">{quiz.description}</p>
                           {bestSession && (
@@ -367,7 +414,10 @@ export default function DashboardPage() {
                 <div key={session.id} className="glass-card p-4 flex items-center justify-between">
                   <div>
                     <p className="text-white font-medium">
-                      {session.quiz_number ? `Quiz ${session.quiz_number}` : 'Quiz'} — {new Date(session.completed_at).toLocaleDateString('en-US', {
+                      {session.quiz_mode === 'adaptive' || session.quiz_number === 0
+                        ? 'Daily Quiz'
+                        : session.quiz_number ? `Quiz ${session.quiz_number}` : 'Quiz'
+                      } — {new Date(session.completed_at).toLocaleDateString('en-US', {
                         weekday: 'short',
                         month: 'short',
                         day: 'numeric'
@@ -375,6 +425,9 @@ export default function DashboardPage() {
                     </p>
                     <p className="text-gray-400 text-sm">
                       {session.correct_answers}/{session.total_questions} correct
+                      {(session.quiz_mode === 'adaptive' || session.quiz_number === 0) && (
+                        <span className="ml-2 text-purple-400 text-xs">🧠 adaptive</span>
+                      )}
                     </p>
                   </div>
                   <div

@@ -4,6 +4,7 @@ import { useAuth } from '../contexts/AuthContext'
 import { useCapture } from '../contexts/CaptureContext'
 import { supabase, withRetry } from '../utils/supabase'
 import { motion, AnimatePresence } from 'framer-motion'
+import { selectAdaptiveQuestions } from '../utils/adaptiveQuizEngine'
 
 export default function QuizPage() {
   const { currentPlayer } = useAuth()
@@ -21,7 +22,9 @@ export default function QuizPage() {
   const [streak, setStreak] = useState(0)
   const [showStreak, setShowStreak] = useState(false)
 
-  const quizNumber = parseInt(searchParams.get('quiz') || '7')
+  const quizParam = searchParams.get('quiz') || 'daily'
+  const isAdaptive = quizParam === 'daily'
+  const quizNumber = isAdaptive ? 0 : parseInt(quizParam)
 
   const playerColor = currentPlayer?.name === 'Krishna' ? '#3b82f6' :
                       currentPlayer?.name === 'Balarama' ? '#10b981' : '#9b4dca'
@@ -32,40 +35,65 @@ export default function QuizPage() {
 
   async function initializeQuiz() {
     try {
-      const { data: allQuestions, error } = await supabase
-        .from('kb_questions')
-        .select('*')
-        .eq('quiz_number', quizNumber)
-        .order('id')
+      let selectedQuestions = []
 
-      if (error) throw error
+      if (isAdaptive) {
+        // ADAPTIVE MODE: Load full bank + mastery data, then select intelligently
+        const [questionsRes, masteryRes, sessionsRes] = await Promise.all([
+          supabase.from('kb_questions').select('*').order('id'),
+          supabase.from('kb_skill_mastery').select('*').eq('player_name', currentPlayer?.name),
+          supabase.from('kb_quiz_sessions').select('*')
+            .eq('player_name', currentPlayer?.name)
+            .eq('status', 'completed')
+            .order('completed_at', { ascending: false })
+            .limit(3)
+        ])
 
-      if (!allQuestions || allQuestions.length === 0) {
-        // Fallback: load all questions if quiz_number not found
-        const { data: fallback } = await supabase
+        const allQuestions = questionsRes.data || []
+        const skillMastery = masteryRes.data || []
+        const recentSessions = sessionsRes.data || []
+
+        selectedQuestions = selectAdaptiveQuestions(
+          currentPlayer?.name, allQuestions, skillMastery, recentSessions
+        )
+      } else {
+        // NUMBERED MODE: Filter by quiz_number (existing behavior)
+        const { data: allQuestions, error } = await supabase
           .from('kb_questions')
           .select('*')
+          .eq('quiz_number', quizNumber)
           .order('id')
 
-        const shuffled = (fallback || []).sort(() => Math.random() - 0.5).slice(0, 15)
-        setQuestions(shuffled)
-      } else {
-        const shuffled = allQuestions.sort(() => Math.random() - 0.5).slice(0, 15)
-        setQuestions(shuffled)
+        if (error) throw error
+
+        if (!allQuestions || allQuestions.length === 0) {
+          const { data: fallback } = await supabase
+            .from('kb_questions')
+            .select('*')
+            .order('id')
+
+          selectedQuestions = (fallback || []).sort(() => Math.random() - 0.5).slice(0, 15)
+        } else {
+          selectedQuestions = allQuestions.sort(() => Math.random() - 0.5).slice(0, 15)
+        }
       }
+
+      setQuestions(selectedQuestions)
 
       // Create session
       const { data: session, error: sessionError } = await supabase
         .from('kb_quiz_sessions')
         .insert({
           player_name: currentPlayer?.name,
-          total_questions: 15,
+          total_questions: selectedQuestions.length,
           correct_answers: 0,
           score_percentage: 0,
           skill_breakdown: {},
           answers: [],
           status: 'in_progress',
-          quiz_number: quizNumber
+          quiz_number: isAdaptive ? 0 : quizNumber,
+          quiz_mode: isAdaptive ? 'adaptive' : 'numbered',
+          question_ids: selectedQuestions.map(q => q.id)
         })
         .select()
         .single()
@@ -75,8 +103,10 @@ export default function QuizPage() {
 
       captureData('quiz_initialized', {
         session_id: session.id,
-        quiz_number: quizNumber,
-        question_count: 15
+        quiz_number: isAdaptive ? 'daily' : quizNumber,
+        quiz_mode: isAdaptive ? 'adaptive' : 'numbered',
+        question_count: selectedQuestions.length,
+        question_ids: selectedQuestions.map(q => q.id)
       }, currentPlayer?.name)
 
     } catch (error) {
@@ -115,6 +145,7 @@ export default function QuizPage() {
     const answerRecord = {
       questionId: currentQuestion.id,
       skill: currentQuestion.skill,
+      subSkill: currentQuestion.sub_skill,
       difficulty: currentQuestion.difficulty,
       selectedIndex: selectedAnswer,
       isCorrect,
@@ -184,6 +215,7 @@ export default function QuizPage() {
         if (error) throw error
       })
 
+      // Update skill mastery
       for (const [skill, data] of Object.entries(breakdown)) {
         const skillPct = (data.correct / data.total) * 100
         await supabase
@@ -196,6 +228,76 @@ export default function QuizPage() {
           .eq('player_name', currentPlayer?.name)
           .eq('skill', skill)
       }
+
+      // Update sub-skill mastery (for adaptive engine accuracy)
+      if (isAdaptive) {
+        const subSkillUpdates = {}
+        finalAnswers.forEach(a => {
+          const key = `${a.skill}::${a.subSkill || 'General'}`
+          if (!subSkillUpdates[key]) subSkillUpdates[key] = { skill: a.skill, subSkill: a.subSkill || 'General', total: 0, correct: 0 }
+          subSkillUpdates[key].total++
+          if (a.isCorrect) subSkillUpdates[key].correct++
+        })
+
+        for (const update of Object.values(subSkillUpdates)) {
+          // Upsert: try update first, insert if not found
+          const { data: existing } = await supabase
+            .from('kb_subskill_mastery')
+            .select('id, attempts, correct')
+            .eq('player_name', currentPlayer?.name)
+            .eq('skill', update.skill)
+            .eq('sub_skill', update.subSkill)
+            .single()
+
+          if (existing) {
+            const newAttempts = existing.attempts + update.total
+            const newCorrect = existing.correct + update.correct
+            await supabase
+              .from('kb_subskill_mastery')
+              .update({
+                attempts: newAttempts,
+                correct: newCorrect,
+                mastery_percentage: (newCorrect / newAttempts) * 100,
+                mastery_stage: newCorrect / newAttempts >= 0.9 ? 5 :
+                               newCorrect / newAttempts >= 0.7 ? 4 :
+                               newCorrect / newAttempts >= 0.5 ? 3 :
+                               newCorrect / newAttempts >= 0.3 ? 2 : 1,
+                last_attempt_at: new Date().toISOString()
+              })
+              .eq('id', existing.id)
+          } else {
+            await supabase
+              .from('kb_subskill_mastery')
+              .insert({
+                player_name: currentPlayer?.name,
+                skill: update.skill,
+                sub_skill: update.subSkill,
+                attempts: update.total,
+                correct: update.correct,
+                mastery_percentage: (update.correct / update.total) * 100,
+                mastery_stage: update.correct / update.total >= 0.9 ? 5 :
+                               update.correct / update.total >= 0.7 ? 4 :
+                               update.correct / update.total >= 0.5 ? 3 :
+                               update.correct / update.total >= 0.3 ? 2 : 1,
+                last_attempt_at: new Date().toISOString()
+              })
+          }
+        }
+
+        // Update recent_accuracy on skill_mastery for next adaptive quiz
+        for (const [skill, data] of Object.entries(breakdown)) {
+          const pct = (data.correct / data.total) * 100
+          await supabase
+            .from('kb_skill_mastery')
+            .update({
+              recent_accuracy: pct,
+              total_attempts: supabase.rpc ? undefined : undefined, // Will be updated by next backfill
+              recommended_difficulty: pct >= 80 ? 4 : pct >= 60 ? 3 : pct >= 40 ? 2 : 1
+            })
+            .eq('player_name', currentPlayer?.name)
+            .eq('skill', skill)
+        }
+      }
     } catch (error) {
       console.error('Failed to save results:', error)
     }
@@ -207,7 +309,8 @@ export default function QuizPage() {
         total: finalAnswers.length,
         percentage,
         breakdown,
-        quizNumber
+        quizNumber: isAdaptive ? 'daily' : quizNumber,
+        isAdaptive
       }
     })
   }
@@ -220,8 +323,10 @@ export default function QuizPage() {
           initial={{ opacity: 0, scale: 0.8 }}
           animate={{ opacity: 1, scale: 1 }}
         >
-          <div className="text-5xl mb-4 animate-bounce">📚</div>
-          <p className="text-gray-400">Loading Quiz {quizNumber}...</p>
+          <div className="text-5xl mb-4 animate-bounce">{isAdaptive ? '🧠' : '📚'}</div>
+          <p className="text-gray-400">
+            {isAdaptive ? 'Building your personalized quiz...' : `Loading Quiz ${quizNumber}...`}
+          </p>
         </motion.div>
       </div>
     )
@@ -244,8 +349,12 @@ export default function QuizPage() {
               Question {currentIndex + 1} of {questions.length}
             </span>
             <div className="flex items-center gap-3">
-              <span className="px-3 py-1 rounded-full bg-white/10 text-sm text-gray-300">
-                Quiz {quizNumber}
+              <span className={`px-3 py-1 rounded-full text-sm ${
+                isAdaptive
+                  ? 'bg-gradient-to-r from-purple-500/20 to-blue-500/20 text-purple-300 border border-purple-500/30'
+                  : 'bg-white/10 text-gray-300'
+              }`}>
+                {isAdaptive ? 'Daily Quiz' : `Quiz ${quizNumber}`}
               </span>
               <span className="px-3 py-1 rounded-full bg-white/10 text-sm">
                 {currentQuestion.skill.split(' ')[0]}
