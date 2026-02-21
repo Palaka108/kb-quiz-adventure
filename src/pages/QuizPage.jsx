@@ -6,6 +6,9 @@ import { supabase, withRetry } from '../utils/supabase'
 import { motion, AnimatePresence } from 'framer-motion'
 import { selectAdaptiveQuestions } from '../utils/adaptiveQuizEngine'
 
+const STORAGE_KEY = 'kb_quiz_active_session'
+const SESSION_MAX_AGE_MS = 2 * 60 * 60 * 1000 // 2 hours
+
 export default function QuizPage() {
   const { currentPlayer } = useAuth()
   const { logQuizAnswer, captureData } = useCapture()
@@ -21,6 +24,7 @@ export default function QuizPage() {
   const [isLoading, setIsLoading] = useState(true)
   const [streak, setStreak] = useState(0)
   const [showStreak, setShowStreak] = useState(false)
+  const [isResuming, setIsResuming] = useState(false)
 
   const quizParam = searchParams.get('quiz') || 'daily'
   const isAdaptive = quizParam === 'daily'
@@ -30,91 +34,189 @@ export default function QuizPage() {
                       currentPlayer?.name === 'Balarama' ? '#10b981' : '#9b4dca'
 
   useEffect(() => {
-    initializeQuiz()
+    initializeOrResumeQuiz()
   }, [])
 
-  async function initializeQuiz() {
+  // Persist session state to localStorage for crash recovery
+  useEffect(() => {
+    if (sessionId && questions.length > 0) {
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify({
+          sessionId,
+          playerName: currentPlayer?.name,
+          questionIds: questions.map(q => q.id),
+          answers,
+          currentIndex,
+          timestamp: Date.now()
+        }))
+      } catch (e) { /* not critical */ }
+    }
+  }, [sessionId, answers, currentIndex, questions])
+
+  async function initializeOrResumeQuiz() {
     try {
-      let selectedQuestions = []
+      const playerName = currentPlayer?.name
+      if (!playerName) { navigate('/login'); return }
 
-      if (isAdaptive) {
-        // ADAPTIVE MODE: Load full bank + mastery data, then select intelligently
-        const [questionsRes, masteryRes, sessionsRes] = await Promise.all([
-          supabase.from('kb_questions').select('*').order('id'),
-          supabase.from('kb_skill_mastery').select('*').eq('player_name', currentPlayer?.name),
-          supabase.from('kb_quiz_sessions').select('*')
-            .eq('player_name', currentPlayer?.name)
-            .eq('status', 'completed')
-            .order('completed_at', { ascending: false })
-            .limit(3)
-        ])
-
-        const allQuestions = questionsRes.data || []
-        const skillMastery = masteryRes.data || []
-        const recentSessions = sessionsRes.data || []
-
-        selectedQuestions = selectAdaptiveQuestions(
-          currentPlayer?.name, allQuestions, skillMastery, recentSessions
-        )
-      } else {
-        // NUMBERED MODE: Filter by quiz_number (existing behavior)
-        const { data: allQuestions, error } = await supabase
-          .from('kb_questions')
-          .select('*')
-          .eq('quiz_number', quizNumber)
-          .order('id')
-
-        if (error) throw error
-
-        if (!allQuestions || allQuestions.length === 0) {
-          const { data: fallback } = await supabase
-            .from('kb_questions')
-            .select('*')
-            .order('id')
-
-          selectedQuestions = (fallback || []).sort(() => Math.random() - 0.5).slice(0, 15)
-        } else {
-          selectedQuestions = allQuestions.sort(() => Math.random() - 0.5).slice(0, 15)
-        }
+      // Check for existing in-progress session
+      const existing = await findExistingSession(playerName)
+      if (existing) {
+        await resumeSession(existing)
+        return
       }
 
-      setQuestions(selectedQuestions)
-
-      // Create session
-      const { data: session, error: sessionError } = await supabase
-        .from('kb_quiz_sessions')
-        .insert({
-          player_name: currentPlayer?.name,
-          total_questions: selectedQuestions.length,
-          correct_answers: 0,
-          score_percentage: 0,
-          skill_breakdown: {},
-          answers: [],
-          status: 'in_progress',
-          quiz_number: isAdaptive ? 0 : quizNumber,
-          quiz_mode: isAdaptive ? 'adaptive' : 'numbered',
-          question_ids: selectedQuestions.map(q => q.id)
-        })
-        .select()
-        .single()
-
-      if (sessionError) throw sessionError
-      setSessionId(session.id)
-
-      captureData('quiz_initialized', {
-        session_id: session.id,
-        quiz_number: isAdaptive ? 'daily' : quizNumber,
-        quiz_mode: isAdaptive ? 'adaptive' : 'numbered',
-        question_count: selectedQuestions.length,
-        question_ids: selectedQuestions.map(q => q.id)
-      }, currentPlayer?.name)
-
+      // No resumable session — start new
+      await startNewQuiz(playerName)
     } catch (error) {
       console.error('Failed to initialize quiz:', error)
       captureData('quiz_init_error', { error: error.message }, currentPlayer?.name)
     } finally {
       setIsLoading(false)
     }
+  }
+
+  async function findExistingSession(playerName) {
+    const { data: sessions, error } = await supabase
+      .from('kb_quiz_sessions')
+      .select('*')
+      .eq('player_name', playerName)
+      .eq('status', 'in_progress')
+      .order('started_at', { ascending: false })
+      .limit(1)
+
+    if (error || !sessions?.length) return null
+    const session = sessions[0]
+
+    // Too old? Abandon it
+    if (Date.now() - new Date(session.started_at).getTime() > SESSION_MAX_AGE_MS) {
+      await supabase.from('kb_quiz_sessions').update({ status: 'abandoned' }).eq('id', session.id)
+      return null
+    }
+    // No question_ids? Can't resume
+    if (!session.question_ids?.length) {
+      await supabase.from('kb_quiz_sessions').update({ status: 'abandoned' }).eq('id', session.id)
+      return null
+    }
+    return session
+  }
+
+  async function resumeSession(session) {
+    setIsResuming(true)
+
+    // Load exact questions in original order
+    const { data: questionData, error } = await supabase
+      .from('kb_questions')
+      .select('*')
+      .in('id', session.question_ids)
+
+    if (error) throw error
+
+    const questionMap = {}
+    questionData.forEach(q => { questionMap[q.id] = q })
+    const orderedQuestions = session.question_ids.map(id => questionMap[id]).filter(Boolean)
+
+    if (orderedQuestions.length === 0) throw new Error('Could not load session questions')
+
+    const savedAnswers = session.answers || []
+    const resumeIndex = savedAnswers.length
+
+    setQuestions(orderedQuestions)
+    setAnswers(savedAnswers)
+    setCurrentIndex(resumeIndex)
+    setSessionId(session.id)
+
+    captureData('quiz_resumed', {
+      session_id: session.id,
+      resumed_at_question: resumeIndex + 1,
+      total_questions: orderedQuestions.length,
+      answers_so_far: savedAnswers.length
+    }, currentPlayer?.name)
+
+    // If all questions already answered, finish immediately
+    if (resumeIndex >= orderedQuestions.length) {
+      setIsLoading(false)
+      finishQuiz(savedAnswers)
+    }
+  }
+
+  async function startNewQuiz(playerName) {
+    let selectedQuestions = []
+
+    if (isAdaptive) {
+      // ADAPTIVE MODE: Load full bank + mastery data, then select intelligently
+      const [questionsRes, masteryRes, sessionsRes] = await Promise.all([
+        supabase.from('kb_questions').select('*').order('id'),
+        supabase.from('kb_skill_mastery').select('*').eq('player_name', playerName),
+        supabase.from('kb_quiz_sessions').select('*')
+          .eq('player_name', playerName)
+          .eq('status', 'completed')
+          .order('completed_at', { ascending: false })
+          .limit(3)
+      ])
+
+      const allQuestions = questionsRes.data || []
+      const skillMastery = masteryRes.data || []
+      const recentSessions = sessionsRes.data || []
+
+      selectedQuestions = selectAdaptiveQuestions(
+        playerName, allQuestions, skillMastery, recentSessions
+      )
+    } else {
+      // NUMBERED MODE: Filter by quiz_number
+      const { data: allQuestions, error } = await supabase
+        .from('kb_questions')
+        .select('*')
+        .eq('quiz_number', quizNumber)
+        .order('id')
+
+      if (error) throw error
+
+      if (!allQuestions || allQuestions.length === 0) {
+        const { data: fallback } = await supabase
+          .from('kb_questions')
+          .select('*')
+          .order('id')
+
+        selectedQuestions = (fallback || []).sort(() => Math.random() - 0.5).slice(0, 15)
+      } else {
+        selectedQuestions = allQuestions.sort(() => Math.random() - 0.5).slice(0, 15)
+      }
+    }
+
+    setQuestions(selectedQuestions)
+
+    // Create session
+    const { data: session, error: sessionError } = await supabase
+      .from('kb_quiz_sessions')
+      .insert({
+        player_name: playerName,
+        total_questions: selectedQuestions.length,
+        correct_answers: 0,
+        score_percentage: 0,
+        skill_breakdown: {},
+        answers: [],
+        status: 'in_progress',
+        quiz_number: isAdaptive ? 0 : quizNumber,
+        quiz_mode: isAdaptive ? 'adaptive' : 'numbered',
+        question_ids: selectedQuestions.map(q => q.id)
+      })
+      .select()
+      .single()
+
+    if (sessionError) throw sessionError
+    setSessionId(session.id)
+
+    captureData('quiz_initialized', {
+      session_id: session.id,
+      quiz_number: isAdaptive ? 'daily' : quizNumber,
+      quiz_mode: isAdaptive ? 'adaptive' : 'numbered',
+      question_count: selectedQuestions.length,
+      question_ids: selectedQuestions.map(q => q.id)
+    }, playerName)
+  }
+
+  function clearSessionStorage() {
+    try { localStorage.removeItem(STORAGE_KEY) } catch { /* not critical */ }
   }
 
   const currentQuestion = questions[currentIndex]
@@ -304,6 +406,8 @@ export default function QuizPage() {
       console.error('Failed to save results:', error)
     }
 
+    clearSessionStorage()
+
     navigate('/results', {
       state: {
         sessionId,
@@ -325,9 +429,9 @@ export default function QuizPage() {
           initial={{ opacity: 0, scale: 0.8 }}
           animate={{ opacity: 1, scale: 1 }}
         >
-          <div className="text-5xl mb-4 animate-bounce">{isAdaptive ? '🧠' : '📚'}</div>
+          <div className="text-5xl mb-4 animate-bounce">{isResuming ? '🔄' : isAdaptive ? '🧠' : '📚'}</div>
           <p className="text-gray-400">
-            {isAdaptive ? 'Building your personalized quiz...' : `Loading Quiz ${quizNumber}...`}
+            {isResuming ? 'Resuming your quiz...' : isAdaptive ? 'Building your personalized quiz...' : `Loading Quiz ${quizNumber}...`}
           </p>
         </motion.div>
       </div>
@@ -344,6 +448,19 @@ export default function QuizPage() {
   return (
     <div className="min-h-screen p-4">
       <div className="max-w-2xl mx-auto">
+        {/* Resume Banner */}
+        {isResuming && currentIndex > 0 && (
+          <motion.div
+            initial={{ opacity: 0, y: -10 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="mb-4 p-3 rounded-xl bg-amber-500/20 border border-amber-500/50 text-center"
+          >
+            <p className="text-amber-300 text-sm font-medium">
+              Welcome back! Picking up at question {currentIndex + 1} of {questions.length}
+            </p>
+          </motion.div>
+        )}
+
         {/* Header */}
         <header className="mb-6">
           <div className="flex justify-between items-center mb-2">
