@@ -215,18 +215,29 @@ export default function QuizPage() {
         if (error) throw error
       })
 
-      // Update skill mastery
+      // Update skill mastery (each update independent — don't let one failure block others)
       for (const [skill, data] of Object.entries(breakdown)) {
-        const skillPct = (data.correct / data.total) * 100
-        await supabase
-          .from('kb_skill_mastery')
-          .update({
-            current_score: skillPct,
-            needs_review: skillPct < 70,
-            last_assessed_at: new Date().toISOString()
+        try {
+          const skillPct = (data.correct / data.total) * 100
+          await withRetry(async () => {
+            const { error } = await supabase
+              .from('kb_skill_mastery')
+              .update({
+                current_score: skillPct,
+                needs_review: skillPct < 70,
+                last_assessed_at: new Date().toISOString(),
+                ...(isAdaptive ? {
+                  recent_accuracy: skillPct,
+                  recommended_difficulty: skillPct >= 80 ? 4 : skillPct >= 60 ? 3 : skillPct >= 40 ? 2 : 1
+                } : {})
+              })
+              .eq('player_name', currentPlayer?.name)
+              .eq('skill', skill)
+            if (error) throw error
           })
-          .eq('player_name', currentPlayer?.name)
-          .eq('skill', skill)
+        } catch (err) {
+          console.error(`Failed to update skill mastery for ${skill}:`, err)
+        }
       }
 
       // Update sub-skill mastery (for adaptive engine accuracy)
@@ -240,62 +251,53 @@ export default function QuizPage() {
         })
 
         for (const update of Object.values(subSkillUpdates)) {
-          // Upsert: try update first, insert if not found
-          const { data: existing } = await supabase
-            .from('kb_subskill_mastery')
-            .select('id, attempts, correct')
-            .eq('player_name', currentPlayer?.name)
-            .eq('skill', update.skill)
-            .eq('sub_skill', update.subSkill)
-            .single()
+          try {
+            const { data: existing } = await supabase
+              .from('kb_subskill_mastery')
+              .select('id, attempts, correct')
+              .eq('player_name', currentPlayer?.name)
+              .eq('skill', update.skill)
+              .eq('sub_skill', update.subSkill)
+              .single()
 
-          if (existing) {
-            const newAttempts = existing.attempts + update.total
-            const newCorrect = existing.correct + update.correct
-            await supabase
-              .from('kb_subskill_mastery')
-              .update({
-                attempts: newAttempts,
-                correct: newCorrect,
-                mastery_percentage: (newCorrect / newAttempts) * 100,
-                mastery_stage: newCorrect / newAttempts >= 0.9 ? 5 :
-                               newCorrect / newAttempts >= 0.7 ? 4 :
-                               newCorrect / newAttempts >= 0.5 ? 3 :
-                               newCorrect / newAttempts >= 0.3 ? 2 : 1,
-                last_attempt_at: new Date().toISOString()
+            if (existing) {
+              const newAttempts = existing.attempts + update.total
+              const newCorrect = existing.correct + update.correct
+              const ratio = newCorrect / newAttempts
+              await withRetry(async () => {
+                const { error } = await supabase
+                  .from('kb_subskill_mastery')
+                  .update({
+                    attempts: newAttempts,
+                    correct: newCorrect,
+                    mastery_percentage: ratio * 100,
+                    mastery_stage: ratio >= 0.9 ? 5 : ratio >= 0.7 ? 4 : ratio >= 0.5 ? 3 : ratio >= 0.3 ? 2 : 1,
+                    last_attempt_at: new Date().toISOString()
+                  })
+                  .eq('id', existing.id)
+                if (error) throw error
               })
-              .eq('id', existing.id)
-          } else {
-            await supabase
-              .from('kb_subskill_mastery')
-              .insert({
-                player_name: currentPlayer?.name,
-                skill: update.skill,
-                sub_skill: update.subSkill,
-                attempts: update.total,
-                correct: update.correct,
-                mastery_percentage: (update.correct / update.total) * 100,
-                mastery_stage: update.correct / update.total >= 0.9 ? 5 :
-                               update.correct / update.total >= 0.7 ? 4 :
-                               update.correct / update.total >= 0.5 ? 3 :
-                               update.correct / update.total >= 0.3 ? 2 : 1,
-                last_attempt_at: new Date().toISOString()
+            } else {
+              const ratio = update.correct / update.total
+              await withRetry(async () => {
+                const { error } = await supabase
+                  .from('kb_subskill_mastery')
+                  .insert({
+                    player_name: currentPlayer?.name,
+                    skill: update.skill,
+                    sub_skill: update.subSkill,
+                    attempts: update.total,
+                    correct: update.correct,
+                    mastery_percentage: ratio * 100,
+                    mastery_stage: ratio >= 0.9 ? 5 : ratio >= 0.7 ? 4 : ratio >= 0.5 ? 3 : ratio >= 0.3 ? 2 : 1,
+                    last_attempt_at: new Date().toISOString()
+                  })
+                if (error) throw error
               })
+            }
+          } catch (err) {
+            console.error(`Failed to update sub-skill mastery for ${update.skill}/${update.subSkill}:`, err)
           }
-        }
-
-        // Update recent_accuracy on skill_mastery for next adaptive quiz
-        for (const [skill, data] of Object.entries(breakdown)) {
-          const pct = (data.correct / data.total) * 100
-          await supabase
-            .from('kb_skill_mastery')
-            .update({
-              recent_accuracy: pct,
-              total_attempts: supabase.rpc ? undefined : undefined, // Will be updated by next backfill
-              recommended_difficulty: pct >= 80 ? 4 : pct >= 60 ? 3 : pct >= 40 ? 2 : 1
-            })
-            .eq('player_name', currentPlayer?.name)
-            .eq('skill', skill)
         }
       }
     } catch (error) {
