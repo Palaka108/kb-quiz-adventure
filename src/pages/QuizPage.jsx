@@ -53,10 +53,22 @@ export default function QuizPage() {
     }
   }, [sessionId, answers, currentIndex, questions])
 
-  async function initializeOrResumeQuiz() {
+  async function initializeOrResumeQuiz(forceNew = false) {
     try {
       const playerName = currentPlayer?.name
       if (!playerName) { navigate('/login'); return }
+
+      // If forcing new, abandon any existing session first
+      if (forceNew) {
+        const existing = await findExistingSession(playerName)
+        if (existing) {
+          await supabase.from('kb_quiz_sessions').update({ status: 'abandoned' }).eq('id', existing.id)
+          captureData('quiz_abandoned_for_new', { abandoned_session: existing.id }, playerName)
+        }
+        clearSessionStorage()
+        await startNewQuiz(playerName)
+        return
+      }
 
       // Check for existing in-progress session
       const existing = await findExistingSession(playerName)
@@ -73,6 +85,18 @@ export default function QuizPage() {
     } finally {
       setIsLoading(false)
     }
+  }
+
+  async function handleStartOver() {
+    setIsLoading(true)
+    setQuestions([])
+    setCurrentIndex(0)
+    setSelectedAnswer(null)
+    setShowFeedback(false)
+    setAnswers([])
+    setStreak(0)
+    setIsResuming(false)
+    await initializeOrResumeQuiz(true)
   }
 
   async function findExistingSession(playerName) {
@@ -144,32 +168,52 @@ export default function QuizPage() {
 
     if (isAdaptive) {
       // ADAPTIVE MODE: Load full bank + mastery data, then select intelligently
-      const [questionsRes, masteryRes, sessionsRes] = await Promise.all([
+      const [questionsRes, masteryRes, sessionsRes, abandonedRes] = await Promise.all([
         supabase.from('kb_questions').select('*').order('id'),
         supabase.from('kb_skill_mastery').select('*').eq('player_name', playerName),
         supabase.from('kb_quiz_sessions').select('*')
           .eq('player_name', playerName)
           .eq('status', 'completed')
           .order('completed_at', { ascending: false })
-          .limit(3)
+          .limit(3),
+        // Also fetch recently abandoned sessions so "Start Over" gives fresh questions
+        supabase.from('kb_quiz_sessions').select('answers, question_ids')
+          .eq('player_name', playerName)
+          .eq('status', 'abandoned')
+          .order('started_at', { ascending: false })
+          .limit(2)
       ])
 
       const allQuestions = questionsRes.data || []
       const skillMastery = masteryRes.data || []
       const recentSessions = sessionsRes.data || []
 
+      // Merge abandoned session answers into recent sessions so the engine avoids those questions
+      const abandonedSessions = (abandonedRes.data || []).map(s => ({
+        answers: (s.answers || []).length > 0
+          ? s.answers
+          : (s.question_ids || []).map(id => ({ questionId: id }))
+      }))
+      const allRecentSessions = [...recentSessions, ...abandonedSessions]
+
       selectedQuestions = selectAdaptiveQuestions(
-        playerName, allQuestions, skillMastery, recentSessions
+        playerName, allQuestions, skillMastery, allRecentSessions
       )
     } else {
-      // NUMBERED MODE: Filter by quiz_number
-      const { data: allQuestions, error } = await supabase
-        .from('kb_questions')
-        .select('*')
-        .eq('quiz_number', quizNumber)
-        .order('id')
+      // NUMBERED MODE: Filter by quiz_number, avoid recently abandoned question sets
+      const [questionsRes, abandonedRes] = await Promise.all([
+        supabase.from('kb_questions').select('*').eq('quiz_number', quizNumber).order('id'),
+        supabase.from('kb_quiz_sessions').select('question_ids')
+          .eq('player_name', playerName)
+          .eq('status', 'abandoned')
+          .order('started_at', { ascending: false })
+          .limit(1)
+      ])
 
-      if (error) throw error
+      const allQuestions = questionsRes.data
+      const abandonedQuestionIds = new Set(
+        (abandonedRes.data || []).flatMap(s => s.question_ids || [])
+      )
 
       if (!allQuestions || allQuestions.length === 0) {
         const { data: fallback } = await supabase
@@ -179,7 +223,10 @@ export default function QuizPage() {
 
         selectedQuestions = (fallback || []).sort(() => Math.random() - 0.5).slice(0, 15)
       } else {
-        selectedQuestions = allQuestions.sort(() => Math.random() - 0.5).slice(0, 15)
+        // Prefer questions NOT in the abandoned set, fall back to all if not enough
+        const fresh = allQuestions.filter(q => !abandonedQuestionIds.has(q.id))
+        const pool = fresh.length >= 15 ? fresh : allQuestions
+        selectedQuestions = pool.sort(() => Math.random() - 0.5).slice(0, 15)
       }
     }
 
@@ -468,6 +515,12 @@ export default function QuizPage() {
               Question {currentIndex + 1} of {questions.length}
             </span>
             <div className="flex items-center gap-3">
+              <button
+                onClick={handleStartOver}
+                className="px-3 py-1 rounded-full text-sm bg-white/10 text-gray-300 hover:bg-white/20 hover:text-white transition-colors"
+              >
+                🔄 New Quiz
+              </button>
               <span className={`px-3 py-1 rounded-full text-sm ${
                 isAdaptive
                   ? 'bg-gradient-to-r from-purple-500/20 to-blue-500/20 text-purple-300 border border-purple-500/30'

@@ -272,39 +272,21 @@ export default function DashboardPage() {
         {/* RESUME QUIZ — shown when there's an in-progress session */}
         {inProgressSession && (
           <section className="mb-6">
-            <motion.button
-              onClick={() => {
-                logAction('quiz_resumed_from_dashboard', {
-                  session_id: inProgressSession.id,
-                  answers_so_far: inProgressSession.answers?.length || 0
-                }, currentPlayer?.name)
-                const mode = inProgressSession.quiz_mode === 'adaptive' || inProgressSession.quiz_number === 0
-                  ? 'daily' : inProgressSession.quiz_number
-                navigate(`/quiz?quiz=${mode}`)
-              }}
-              className="w-full glass-card p-6 text-center transition-all duration-300
-                       hover:scale-[1.01] active:scale-[0.99] relative overflow-hidden"
+            <motion.div
+              className="w-full glass-card p-6 text-center relative overflow-hidden"
               style={{
                 borderColor: '#f59e0b',
                 boxShadow: '0 0 30px rgba(245, 158, 11, 0.3)'
               }}
               initial={{ opacity: 0, y: -10 }}
               animate={{ opacity: 1, y: 0 }}
-              whileHover={{ scale: 1.01 }}
-              whileTap={{ scale: 0.99 }}
             >
               <div className="text-4xl mb-3">🔄</div>
-              <h2 className="text-xl font-display text-white mb-1">Resume Quiz</h2>
-              <p className="text-gray-400 text-sm mb-3">
-                {inProgressSession.answers?.length || 0} of {inProgressSession.total_questions} answered — pick up where you left off
+              <h2 className="text-xl font-display text-white mb-1">Quiz In Progress</h2>
+              <p className="text-gray-400 text-sm mb-4">
+                {inProgressSession.answers?.length || 0} of {inProgressSession.total_questions} answered
               </p>
-              <div
-                className="inline-block px-6 py-2 rounded-xl font-bold text-white"
-                style={{ backgroundColor: '#f59e0b' }}
-              >
-                Continue →
-              </div>
-              <div className="mt-3 w-full bg-white/10 rounded-full h-2">
+              <div className="mb-4 w-full bg-white/10 rounded-full h-2">
                 <div
                   className="h-2 rounded-full transition-all"
                   style={{
@@ -313,7 +295,39 @@ export default function DashboardPage() {
                   }}
                 />
               </div>
-            </motion.button>
+              <div className="flex gap-3 justify-center">
+                <button
+                  onClick={() => {
+                    logAction('quiz_resumed_from_dashboard', {
+                      session_id: inProgressSession.id,
+                      answers_so_far: inProgressSession.answers?.length || 0
+                    }, currentPlayer?.name)
+                    const mode = inProgressSession.quiz_mode === 'adaptive' || inProgressSession.quiz_number === 0
+                      ? 'daily' : inProgressSession.quiz_number
+                    navigate(`/quiz?quiz=${mode}`)
+                  }}
+                  className="px-6 py-3 rounded-xl font-bold text-white transition-all hover:scale-105 active:scale-95"
+                  style={{ backgroundColor: '#f59e0b' }}
+                >
+                  Continue →
+                </button>
+                <button
+                  onClick={async () => {
+                    logAction('quiz_abandoned_from_dashboard', {
+                      session_id: inProgressSession.id
+                    }, currentPlayer?.name)
+                    await supabase
+                      .from('kb_quiz_sessions')
+                      .update({ status: 'abandoned' })
+                      .eq('id', inProgressSession.id)
+                    setInProgressSession(null)
+                  }}
+                  className="px-6 py-3 rounded-xl font-bold text-gray-300 bg-white/10 hover:bg-white/20 transition-all hover:scale-105 active:scale-95"
+                >
+                  Start Fresh
+                </button>
+              </div>
+            </motion.div>
           </section>
         )}
 
