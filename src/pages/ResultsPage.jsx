@@ -42,6 +42,11 @@ export default function ResultsPage() {
         }
       }
       frame()
+
+      // Clear confetti canvas after 3 seconds so it doesn't freeze on screen
+      setTimeout(() => {
+        confetti.reset()
+      }, duration + 500)
     }
   }, [percentage, refreshPlayer])
 
